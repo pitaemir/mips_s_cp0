@@ -1,19 +1,46 @@
-module coprocessor0(
-  input clk, reset,
-  input [7:0] interrupts,
-  input cop0write,
-  input [4:0] readaddress, writeaddress,
-  input [31:0] writecop0,
-  input [31:0] pc,
-  input overflow, syscall, break_, ri,
-  input adesable, adelable, misaligned,
-  input rfe,
-  input activeexception,
-  output reg [31:0] cop0readdata,
-  output pendingexception,
-  output iec
+
+/****************************************************************
+*
+* BUSCAR NA WEB UMA BOA DESCRICAO DE PROJETO
+*****************************************************************/
+
+
+
+module coprocessor0
+  (#parameter DATA_WIDTH = 32
+  
+  )
+  (
+  clk, reset,
+  interrupts,
+  cop0write,
+  readaddress, writeaddress,
+  writecop0,
+  pc,
+  overflow, syscall, break_, ri,
+  adesable, adelable, misaligned,
+  rfe,
+  activeexception,
+  cop0readdata,
+  pendingexception,
+  iec
 );
 
+ input clk, reset;
+  input [7:0] interrupts;
+  input cop0write;
+  input [4:0] readaddress, writeaddress;
+  input [31:0] writecop0;
+  input [31:0] pc;
+  input overflow, syscall, break_, ri;
+  input adesable, adelable, misaligned;
+  //input rfe, -- remover (eret)
+  input activeexception;
+  output reg [DATA_WIDTH-1 : 0] cop0readdata;
+  output pendingexception;
+  //output iec nao é output do cp0, sim o sr
+
+  
   wire [31:0] statusreg, causereg, epc, cycle;
   wire [4:0] exccode;
   wire [7:0]mask_interrupts;
@@ -32,6 +59,8 @@ module coprocessor0(
   causeregunit crunit(clk, reset, activeexception, exccode, causereg);
 
   cyclecounterunit counter(clk, reset, cycle);
+
+  //compare register
 
   always @(readaddress or statusreg or causereg or epc or cycle) begin
     case (readaddress)
@@ -53,16 +82,17 @@ input [7:0] interrupts,
 output reg pendingexception,
 output reg [4:0] exccode
 );
+  
 wire interrupt = iec & | interrupts;
-wire adel = adelable | misaligned;
-wire ades = adesable | misaligned;
+wire adel = adelable | misaligned; //address ex load
+wire ades = adesable | misaligned; //address ex store
 
 
 always @(interrupt or overflow or syscall or break_ or ri or adel or ades) begin
 pendingexception = interrupt | overflow | syscall | break_ | ri | adel | ades;
 casex ({interrupt, overflow, adel, ades, syscall, break_, ri})
 8'b1xxxxxxx: exccode = 5'b00001; // interrupt
-8'b01xxxxxx: exccode = 5'b01100; // overflow
+8'b01xxxxxx: exccode = 5'b01100; // overflow - remover.
 8'b001xxxxx: exccode = 5'b00100; // adel
 8'b0001xxxx: exccode = 5'b00101; // ades
 8'b00001xxx: exccode = 5'b01000; // syscall
@@ -96,7 +126,7 @@ module statusregunit (
   input reset,            
   input writeenable,      // (mtc0)
   input activeexception,  // (zera IEC)
-  input rfe,              // (restaura IEC)
+  input rfe,              // (restaura IEC) remover - eret
   input [31:0] writedata, 
   output reg [31:0] statusreg, 
   output iec // Interrupt Enable

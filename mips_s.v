@@ -1,188 +1,245 @@
+module coprocessor0(
+  input         clk, reset,
 
-/****************************************************************
-*
-* BUSCAR NA WEB UMA BOA DESCRICAO DE PROJETO
-*****************************************************************/
+  input   [7:0] interrupts,
 
+  input         cop0write,          // pulso MTC0
+  input   [4:0] cp0_readaddress, 
+  input   [4:0] cp0_writeaddress,
+  input   [31:0] writecop0,         // dado vindo da ULA
+  input   [31:0] pc,
+  input         syscall,  
+  input         ri,                 // reserved instruction
 
-
-module coprocessor0
-  (#parameter DATA_WIDTH = 32
-  
-  )
-  (
-  clk, reset,
-  interrupts,
-  cop0write,
-  readaddress, writeaddress,
-  writecop0,
-  pc,
-  overflow, syscall, break_, ri,
-  adesable, adelable, misaligned,
-  rfe,
-  activeexception,
-  cop0readdata,
-  pendingexception,
-  iec
+  input         eret,               // return from exception
+  input         activeexception,
+  output reg [31:0] cop0readdata,
+  output        pendingexception
 );
 
- input clk, reset;
-  input [7:0] interrupts;
-  input cop0write;
-  input [4:0] readaddress, writeaddress;
-  input [31:0] writecop0;
-  input [31:0] pc;
-  input overflow, syscall, break_, ri;
-  input adesable, adelable, misaligned;
-  //input rfe, -- remover (eret)
-  input activeexception;
-  output reg [DATA_WIDTH-1 : 0] cop0readdata;
-  output pendingexception;
-  //output iec nao é output do cp0, sim o sr
+  wire [31:0] statusreg, causereg, epc, count, compare;
+  wire [4:0]  exccode;
+  wire        iec; // Interrupt Enable do Status Reg
 
-  
-  wire [31:0] statusreg, causereg, epc, cycle;
-  wire [4:0] exccode;
-  wire [7:0]mask_interrupts;
+  //wire timer_interrupt = (count == compare);
+  //wire [7:0] all_interrupts = {interrupts[6:0], timer_interrupt};
 
+
+  // --- Unidade de exceção ---
   exceptionunit excu(
-    overflow, syscall, break_, ri,
-    adesable, adelable, misaligned,
-    iec, interrupts,
-    pendingexception, exccode
+    .syscall(syscall),
+    .ri(ri),
+    .iec(iec),
+    //.interrupts(all_interrupts),
+    .interrupts(interrupts),
+    .pendingexception(pendingexception),
+    .exccode(exccode)
   );
 
-  epcunit epcu(clk, reset, activeexception, pc, epc);
+  // --- EPC ---
+  epcunit epcu(
+    .clk(clk),
+    .reset(reset),
+    .activeexception(activeexception),
+    .pc(pc),
+    .epc(epc)
+  );
 
-  statusregunit srunit(clk, reset, cop0write && (writeaddress == 5'b01100), activeexception, rfe, writecop0, statusreg, iec);
+  // --- STATUS ---
+  statusregunit srunit(
+    .clk(clk),
+    .reset(reset),
+    .writeenable(cop0write && (cp0_writeaddress == 5'b01100)), // Status = reg 12
+    .activeexception(activeexception),
+    .eret(eret),                     
+    .writedata(writecop0),
+    .statusreg(statusreg),
+    .iec(iec)
+  );
 
-  causeregunit crunit(clk, reset, activeexception, exccode, causereg);
+  // --- CAUSE ---
+  causeregunit crunit(
+    .clk(clk),
+    .reset(reset),
+    .activeexception(activeexception),
+    .exccode(exccode),
+    .causereg(causereg)
+  );
 
-  cyclecounterunit counter(clk, reset, cycle);
+  // --- COUNT ---
+  countregunit count_reg(
+    .clk(clk),
+    .reset(reset),
+    .writeenable(cop0write && (cp0_writeaddress == 5'b01001)), // Count = 9
+    .writedata(writecop0),
+    .count(count)
+  );
 
-  //compare register
+  // --- COMPARE ---
+  compareregunit compare_reg(
+    .clk(clk),
+    .reset(reset),
+    .writeenable(cop0write && (cp0_writeaddress == 5'b01011)), // Compare = 11
+    .writedata(writecop0),
+    .compare(compare)
+  );
 
-  always @(readaddress or statusreg or causereg or epc or cycle) begin
-    case (readaddress)
+  // --- MFC0 (leitura dos regs do CP0) ---
+  always @(cp0_readaddress or statusreg or causereg or epc or count or compare) begin
+    case (cp0_readaddress)
       5'b01100: cop0readdata = statusreg; // Status
       5'b01101: cop0readdata = causereg;  // Cause
       5'b01110: cop0readdata = epc;       // EPC
-      5'b01111: cop0readdata = cycle;     // Cycle counter
-      default: cop0readdata = 32'hxxxxxxxx;
+      5'b01001: cop0readdata = count;     // Count
+      5'b01011: cop0readdata = compare;   // Compare
+      default:  cop0readdata = 32'hxxxxxxxx;
     endcase
   end
 
 endmodule
 
+
 module exceptionunit(
-input overflow, syscall, break_, ri,
-input adesable, adelable, misaligned,
-input iec,
-input [7:0] interrupts,
-output reg pendingexception,
-output reg [4:0] exccode
+  input        syscall,        // instrução SYSCALL detectada
+  input        ri,             // instrução inválida (Reserved Instruction)
+  input        iec,            // bit de enable de interrupção do Status
+  input  [7:0] interrupts,     // linhas de interrupção externas + timer
+
+  output reg   pendingexception,
+  output reg [4:0] exccode
 );
-  
-wire interrupt = iec & | interrupts;
-wire adel = adelable | misaligned; //address ex load
-wire ades = adesable | misaligned; //address ex store
 
+  // Interrupção válida somente se IEC=1
+  wire interrupt = iec & (|interrupts);
 
-always @(interrupt or overflow or syscall or break_ or ri or adel or ades) begin
-pendingexception = interrupt | overflow | syscall | break_ | ri | adel | ades;
-casex ({interrupt, overflow, adel, ades, syscall, break_, ri})
-8'b1xxxxxxx: exccode = 5'b00001; // interrupt
-8'b01xxxxxx: exccode = 5'b01100; // overflow - remover.
-8'b001xxxxx: exccode = 5'b00100; // adel
-8'b0001xxxx: exccode = 5'b00101; // ades
-8'b00001xxx: exccode = 5'b01000; // syscall
-8'b000001xx: exccode = 5'b01001; // break
-8'b0000001x: exccode = 5'b01010; // reserved instruction
-default: exccode = 5'b00000;
-endcase
-end
+  always @(*) begin
+    // pendingexception = OR de todos os eventos
+    pendingexception = interrupt | syscall | ri;
+
+    // Prioridade: INT > SYSCALL > RI
+    if (interrupt)
+      exccode = 5'b00001;  // Interrupção
+    else if (syscall)
+      exccode = 5'b01000;  // Syscall
+    else if (ri)
+      exccode = 5'b01010;  // Reserved Instruction
+    else
+      exccode = 5'b00000;  // Sem exceção ativa
+  end
+
 endmodule
 
+
 module epcunit (
-  input clk,                   
-  input reset,                 
-  input activeexception,       
-  input [31:0] pc,             
-  output reg [31:0] epc       
+  input        clk,             // clock principal
+  input        reset,           // reset síncrono ou assíncrono (aqui síncrono)
+  input        activeexception, // sinal de exceção detectada
+  input [31:0] pc,              // PC da instrução que causou exceção
+  output reg [31:0] epc         // registrador EPC
 );
 
   always @(posedge clk) begin
     if (reset)
-      epc <= 32'b0;
+      epc <= 32'b0;      // zera EPC no reset
     else if (activeexception)
-      epc <= pc;
+      epc <= pc;         // salva o PC no momento da exceção
   end
 
 endmodule
 
 
 module statusregunit (
-  input clk,              
-  input reset,            
-  input writeenable,      // (mtc0)
-  input activeexception,  // (zera IEC)
-  input rfe,              // (restaura IEC) remover - eret
-  input [31:0] writedata, 
-  output reg [31:0] statusreg, 
-  output iec // Interrupt Enable
+  input        clk,
+  input        reset,
+  input        writeenable,      // habilita escrita via MTC0
+  input        activeexception,  // exceção detectada -> zera IEC
+  input        eret,             // ERET -> restaura IEC
+  input  [31:0] writedata,       // dado escrito via MTC0
+
+  output reg [31:0] statusreg,   // registrador completo
+  output            iec          // bit IEC (Interrupt Enable)
 );
 
-  wire new_iec;
-
-  // Lógica para definir o novo valor de IEC
-  assign new_iec = rfe     ? 1'b1 : // RFE restaura IEC
-                   reset   ? 1'b0 : // Reset zera IEC
-                   activeexception ? 1'b0 : // Exceção zera IEC
-                   writeenable ? writedata[0] : statusreg[0]; // MTC0
-
-  // Atualiza o registrador status
+  // Lógica síncrona para atualizar statusreg
   always @(posedge clk) begin
-    if (reset)
-      statusreg <= 32'b0; // Zera tudo no reset
-    else
-      statusreg[0] <= new_iec; 
+    if (reset) begin
+      statusreg <= 32'b0;             // limpa tudo no reset
+    end 
+    else if (activeexception) begin
+      statusreg[0] <= 1'b0;           // desabilita interrupções
+    end
+    else if (eret) begin
+      statusreg[0] <= 1'b1;           // reabilita interrupções
+    end
+    else if (writeenable) begin
+      statusreg <= writedata;         // escreve novo valor inteiro
+    end
   end
 
-  // Saída IEC direto do registrador
+  // IEC é simplesmente o bit 0 do statusreg
   assign iec = statusreg[0];
 
 endmodule
 
+
 module causeregunit (
-  input clk,
-  input reset,
-  input activeexception,       // Grava nova exceção
-  input [4:0] exccode,         // Código da exceção (exceptionunit)
-  output reg [31:0] causereg   // Saída do registrador Cause
+  input        clk,
+  input        reset,
+  input        activeexception,  // sinal de exceção detectada
+  input  [4:0] exccode,          // código da exceção vindo da exceptionunit
+  input  [7:0] interrupts,       // estado atual das interrupções externas (opcional)
+  
+  output reg [31:0] causereg
 );
 
   always @(posedge clk) begin
-    if (reset)
+    if (reset) begin
       causereg <= 32'b0;
-    else if (activeexception)
-      causereg <= {16'b0, 8'b0, exccode, 2'b00};
+    end
+    else if (activeexception) begin
+      causereg <= {27'b0, exccode, 2'b00};
+    end
   end
 
 endmodule
 
-module cyclecounterunit (
-  input clk,
-  input reset,
-  output reg [31:0] cycle
+
+
+module countregunit (
+  input        clk,
+  input        reset,
+  input        writeenable,   // MTC0 para escrever em Count
+  input  [31:0] writedata,
+  output reg [31:0] count
 );
 
   always @(posedge clk) begin
     if (reset)
-      cycle <= 32'b0;
+      count <= 32'b0;
+    else if (writeenable)
+      count <= writedata;
     else
-      cycle <= cycle + 1;
+      count <= count + 1;
   end
 
 endmodule
+
+module compareregunit (
+  input        clk,
+  input        reset,
+  input        writeenable,   // MTC0 para escrever em Compare
+  input  [31:0] writedata,
+  output reg [31:0] compare
+);
+
+  always @(posedge clk) begin
+    if (reset)
+      compare <= 32'b0;
+    else if (writeenable)
+      compare <= writedata;
+  end
+
+endmodule
+
 
 

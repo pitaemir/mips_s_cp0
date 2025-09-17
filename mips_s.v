@@ -242,4 +242,10 @@ module compareregunit (
 endmodule
 
 
+//HWREna register.
+//implementar para trabalhar junto com o count e compare
+//cicle counting and enable user mode to read anything from the coprocessor 0
+
+//terei que implementar algo em assembly?
+
 
